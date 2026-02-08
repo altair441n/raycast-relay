@@ -1,0 +1,16 @@
+{
+  "name": "raycast-relay",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260101.0",
+    "@types/node": "^25.0.3",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.16.1"
+  }
+}

@@ -1,0 +1,25 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "raycast2api",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-03-21",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"observability": {
+		"enabled": true
+	},
+	"vars": {
+		"DEBUG": "false"
+	},
+	"kv_namespaces": [
+		{
+			"binding": "R2A_ATTACHMENTS",
+			"id": "498510ec04434688ba1344e2a580c239"
+		}
+	],
+}
