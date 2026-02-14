@@ -18,8 +18,7 @@
 	},
 	"kv_namespaces": [
 		{
-			"binding": "R2A_ATTACHMENTS",
-			"id": "498510ec04434688ba1344e2a580c239"
+			"binding": "R2A_ATTACHMENTS"
 		}
 	],
 }

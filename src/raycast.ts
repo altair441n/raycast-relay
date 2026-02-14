@@ -202,7 +202,9 @@ export async function createStreamingChatCompletion(
           const { done, value } = await reader.read();
           if (done) break;
           if (value) {
-            buffer += decoder.decode(value, { stream: true });
+            const rawChunk = decoder.decode(value, { stream: true });
+            logger.debug(`SSE raw chunk: ${rawChunk}`);
+            buffer += rawChunk;
             const lines = buffer.split("\n");
             buffer = lines.pop() || "";
 
@@ -215,6 +217,7 @@ export async function createStreamingChatCompletion(
                 }
                 try {
                   const parsed = JSON.parse(data);
+                  logger.debug(`SSE parsed: ${JSON.stringify(parsed)}`);
                   controller.enqueue(parsed);
                 } catch {
                 }
@@ -259,6 +262,7 @@ export function parseSSEResponse(responseText: string, logger?: Logger): { text:
       try {
         const data = line.substring(5).trim();
         if (data === "[DONE]") break;
+        if (logger) logger.debug(`SSE line: ${data}`);
         const jsonData: RaycastSSEData = JSON.parse(data);
         if (jsonData.text) text += jsonData.text;
         if (jsonData.reasoning) reasoning += jsonData.reasoning;
