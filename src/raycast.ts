@@ -73,6 +73,25 @@ async function fetchRaycastWithRetry(
   return response;
 }
 
+function isCreditsErrorEvent(data: any): boolean {
+  return data?.error?.type === "credits_error";
+}
+
+function hasCreditsErrorInSSE(responseText: string): boolean {
+  for (const line of responseText.split("\n")) {
+    if (line.startsWith("data:")) {
+      try {
+        const data = line.substring(5).trim();
+        if (data === "[DONE]") break;
+        const jsonData = JSON.parse(data);
+        if (isCreditsErrorEvent(jsonData)) return true;
+      } catch {
+      }
+    }
+  }
+  return false;
+}
+
 export async function fetchModels(env: Env): Promise<Map<string, ModelInfo>> {
   const logger = new Logger(env);
 
@@ -161,13 +180,15 @@ export async function createStreamingChatCompletion(
 ): Promise<ReadableStream> {
   const logger = new Logger(env);
   const payloadString = JSON.stringify(requestPayload);
+  const url = "https://backend.raycast.com/api/v1/ai/chat_completions";
+  const init: RequestInit = {
+    method: "POST",
+    body: payloadString,
+  };
 
   logger.debug("Sending streaming request to Raycast...");
 
-  const response = await fetchRaycastWithRetry(env, "https://backend.raycast.com/api/v1/ai/chat_completions", payloadString, {
-    method: "POST",
-    body: payloadString,
-  });
+  let response = await fetchRaycastWithRetry(env, url, payloadString, init);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -182,10 +203,35 @@ export async function createStreamingChatCompletion(
 
   return new ReadableStream({
     async start(controller) {
-      const reader = response.body!.getReader();
+      let reader = response.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
       let isClosed = false;
+      let didRetryCreditsError = false;
+
+      const retryAfterCreditsError = async () => {
+        if (env.DEVICE_ID || didRetryCreditsError) return false;
+        didRetryCreditsError = true;
+        logger.warn("Credits error detected in SSE, rotating device id and retrying...");
+        try {
+          await reader.cancel();
+        } catch {
+        }
+        await rotateDeviceId(env);
+        response = await fetchRaycastWithRetry(env, url, payloadString, init);
+        if (!response.ok) {
+          const errorText = await response.text();
+          logger.error(`Raycast API error: ${response.status} ${errorText}`);
+          throw new Error(`Raycast API error: ${response.status} - ${errorText}`);
+        }
+        if (!response.body) {
+          logger.error("Raycast response body is empty");
+          throw new Error("Stream completion response body is missing");
+        }
+        reader = response.body.getReader();
+        buffer = "";
+        return true;
+      };
 
       const safeClose = () => {
         if (!isClosed) {
@@ -200,13 +246,32 @@ export async function createStreamingChatCompletion(
       try {
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            if (!isClosed && buffer.trim()) {
+              const line = buffer.trim();
+              if (line.startsWith("data: ")) {
+                const data = line.substring(6).trim();
+                if (data !== "[DONE]") {
+                  try {
+                    const parsed = JSON.parse(data);
+                    if (isCreditsErrorEvent(parsed)) {
+                      if (await retryAfterCreditsError()) continue;
+                    } else {
+                      controller.enqueue(parsed);
+                    }
+                  } catch { }
+                }
+              }
+            }
+            break;
+          }
           if (value) {
             const rawChunk = decoder.decode(value, { stream: true });
             logger.debug(`SSE raw chunk: ${rawChunk}`);
             buffer += rawChunk;
             const lines = buffer.split("\n");
             buffer = lines.pop() || "";
+            let shouldRetry = false;
 
             for (const line of lines) {
               if (line.startsWith("data: ")) {
@@ -218,23 +283,22 @@ export async function createStreamingChatCompletion(
                 try {
                   const parsed = JSON.parse(data);
                   logger.debug(`SSE parsed: ${JSON.stringify(parsed)}`);
-                  controller.enqueue(parsed);
+                  if (isCreditsErrorEvent(parsed)) {
+                    if (await retryAfterCreditsError()) {
+                      shouldRetry = true;
+                      break;
+                    }
+                  } else {
+                    controller.enqueue(parsed);
+                  }
                 } catch {
                 }
               }
             }
-            if (isClosed) break;
-          }
-        }
-        if (!isClosed && buffer.trim()) {
-          const line = buffer.trim();
-          if (line.startsWith("data: ")) {
-            const data = line.substring(6).trim();
-            if (data !== "[DONE]") {
-              try {
-                controller.enqueue(JSON.parse(data));
-              } catch { }
+            if (shouldRetry) {
+              continue;
             }
+            if (isClosed) break;
           }
         }
       } catch (error) {
@@ -305,13 +369,15 @@ export async function createNonStreamingChatCompletion(
 ): Promise<{ text: string; reasoning: string; tool_calls: any[]; model_update?: string; images: string[] }> {
   const logger = new Logger(env);
   const payloadString = JSON.stringify(requestPayload);
+  const url = "https://backend.raycast.com/api/v1/ai/chat_completions";
+  const init: RequestInit = {
+    method: "POST",
+    body: payloadString,
+  };
 
   logger.debug("Sending non-streaming request to Raycast...");
 
-  const response = await fetchRaycastWithRetry(env, "https://backend.raycast.com/api/v1/ai/chat_completions", payloadString, {
-    method: "POST",
-    body: payloadString,
-  });
+  let response = await fetchRaycastWithRetry(env, url, payloadString, init);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -319,7 +385,18 @@ export async function createNonStreamingChatCompletion(
     throw new Error(`Raycast API error: ${response.status} - ${errorText}`);
   }
 
-  const responseText = await response.text();
+  let responseText = await response.text();
+  if (!env.DEVICE_ID && hasCreditsErrorInSSE(responseText)) {
+    logger.warn("Credits error detected in SSE, rotating device id and retrying...");
+    await rotateDeviceId(env);
+    response = await fetchRaycastWithRetry(env, url, payloadString, init);
+    if (!response.ok) {
+      const errorText = await response.text();
+      logger.error(`Raycast API error: ${response.status} ${errorText}`);
+      throw new Error(`Raycast API error: ${response.status} - ${errorText}`);
+    }
+    responseText = await response.text();
+  }
   return parseSSEResponse(responseText, logger);
 }
 
